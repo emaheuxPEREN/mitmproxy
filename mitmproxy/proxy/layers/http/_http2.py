@@ -1,5 +1,7 @@
 import collections
+import copy
 import time
+from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import Enum
 from logging import DEBUG
@@ -60,17 +62,17 @@ class StreamState(Enum):
 
 
 CATCH_HYPER_H2_ERRORS = (ValueError, IndexError)
+H2_CONF_DEFAULTS: Mapping[str, Any] = dict(
+    header_encoding=False,
+    validate_outbound_headers=False,
+    # validate_inbound_headers is controlled by the validate_inbound_headers option.
+    normalize_inbound_headers=False,  # changing this to True is required to pass h2spec
+    normalize_outbound_headers=False,
+)
 
 
 class Http2Connection(HttpConnection):
-    h2_conf: ClassVar[h2.config.H2Configuration]
-    h2_conf_defaults: dict[str, Any] = dict(
-        header_encoding=False,
-        validate_outbound_headers=False,
-        # validate_inbound_headers is controlled by the validate_inbound_headers option.
-        normalize_inbound_headers=False,  # changing this to True is required to pass h2spec
-        normalize_outbound_headers=False,
-    )
+    H2_CONF_BASE: ClassVar[h2.config.H2Configuration]
     h2_conn: BufferedH2Connection
     streams: dict[int, StreamState]
     """keep track of all active stream ids to send protocol errors on teardown"""
@@ -80,16 +82,20 @@ class Http2Connection(HttpConnection):
     ReceiveTrailers: type[RequestTrailers | ResponseTrailers]
     ReceiveEndOfMessage: type[RequestEndOfMessage | ResponseEndOfMessage]
 
+    @classmethod
+    def get_h2_conf(cls, *, context: Context, debug: bool) -> h2.config.H2Configuration:
+        # TODO: use copy.replace (from Python 3.13)
+        h2_conf = copy.copy(cls.H2_CONF_BASE)  # shallow copy
+        if debug:
+            h2_conf.logger = H2ConnectionLogger(context.client.peername, cls.__name__)
+        h2_conf.validate_inbound_headers = context.options.validate_inbound_headers
+        return h2_conf
+
     def __init__(self, context: Context, conn: Connection):
         super().__init__(context, conn)
-        if self.debug:
-            self.h2_conf.logger = H2ConnectionLogger(
-                self.context.client.peername, self.__class__.__name__
-            )
-        self.h2_conf.validate_inbound_headers = (
-            self.context.options.validate_inbound_headers
+        self.h2_conn = BufferedH2Connection(
+            self.get_h2_conf(context=context, debug=bool(self.debug))
         )
-        self.h2_conn = BufferedH2Connection(self.h2_conf)
         self.streams = {}
 
     def is_closed(self, stream_id: int) -> bool:
@@ -404,8 +410,8 @@ def format_h2_response_headers(
 
 
 class Http2Server(Http2Connection):
-    h2_conf = h2.config.H2Configuration(
-        **Http2Connection.h2_conf_defaults,
+    H2_CONF_BASE = h2.config.H2Configuration(
+        **H2_CONF_DEFAULTS,
         client_side=False,
     )
 
@@ -472,8 +478,8 @@ class Http2Server(Http2Connection):
 
 
 class Http2Client(Http2Connection):
-    h2_conf = h2.config.H2Configuration(
-        **Http2Connection.h2_conf_defaults,
+    H2_CONF_BASE = h2.config.H2Configuration(
+        **H2_CONF_DEFAULTS,
         client_side=True,
     )
 
