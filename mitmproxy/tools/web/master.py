@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 class WebMaster(master.Master):
     def __init__(self, opts: options.Options, with_termlog: bool = True):
         super().__init__(opts, with_termlog=with_termlog)
+
         self.view = view.View()
         self.view.sig_view_add.connect(self._sig_view_add)
         self.view.sig_view_remove.connect(self._sig_view_remove)
@@ -36,8 +37,6 @@ class WebMaster(master.Master):
         self.events = eventstore.EventStore()
         self.events.sig_add.connect(self._sig_events_add)
         self.events.sig_refresh.connect(self._sig_events_refresh)
-
-        self.options.changed.connect(self._sig_options_update)
 
         self.addons.add(*addons.default_addons())
         self.addons.add(
@@ -54,41 +53,48 @@ class WebMaster(master.Master):
         self.proxyserver: Proxyserver = self.addons.get("proxyserver")
         self.proxyserver.servers.changed.connect(self._sig_servers_changed)
 
+        self.options.changed.connect(self._sig_options_update)
+
     def _sig_view_add(self, flow: flow.Flow) -> None:
-        app.ClientConnection.broadcast_flow("flows/add", flow)
+        app.ClientConnection.broadcast_flow(self.app.connections, "flows/add", flow)
 
     def _sig_view_update(self, flow: flow.Flow) -> None:
-        app.ClientConnection.broadcast_flow("flows/update", flow)
+        app.ClientConnection.broadcast_flow(self.app.connections, "flows/update", flow)
 
     def _sig_view_remove(self, flow: flow.Flow, index: int) -> None:
         app.ClientConnection.broadcast(
+            self.app.connections,
             type="flows/remove",
             payload=flow.id,
         )
 
     def _sig_view_refresh(self) -> None:
-        app.ClientConnection.broadcast_flow_reset()
+        app.ClientConnection.broadcast_flow_reset(self.app.connections)
 
     def _sig_events_add(self, entry: log.LogEntry) -> None:
         app.ClientConnection.broadcast(
+            self.app.connections,
             type="events/add",
             payload=app.logentry_to_json(entry),
         )
 
     def _sig_events_refresh(self) -> None:
         app.ClientConnection.broadcast(
+            self.app.connections,
             type="events/reset",
         )
 
     def _sig_options_update(self, updated: set[str]) -> None:
         options_dict = optmanager.dump_dicts(self.options, updated)
         app.ClientConnection.broadcast(
+            self.app.connections,
             type="options/update",
             payload=options_dict,
         )
 
     def _sig_servers_changed(self) -> None:
         app.ClientConnection.broadcast(
+            self.app.connections,
             type="state/update",
             payload={
                 "servers": {

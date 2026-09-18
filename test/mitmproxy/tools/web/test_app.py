@@ -77,6 +77,7 @@ class TestApp(tornado.testing.AsyncHTTPTestCase):
         self.events = m.events
         webapp = app.Application(m, None)
         webapp.settings["xsrf_cookies"] = False
+        self.connections = webapp.connections  # alias
         return webapp
 
     @property
@@ -493,7 +494,7 @@ class TestApp(tornado.testing.AsyncHTTPTestCase):
         f.id = "41"
         f.request.content = b"foo\nbarbar"
 
-        app.ClientConnection.broadcast_flow("flows/add", f)
+        app.ClientConnection.broadcast_flow(self.connections, "flows/add", f)
 
         response = yield ws_client.read_message()
         response = json.loads(response)
@@ -505,7 +506,7 @@ class TestApp(tornado.testing.AsyncHTTPTestCase):
         # test update flow
         f.request.content = b"bar"
 
-        app.ClientConnection.broadcast_flow("flows/update", f)
+        app.ClientConnection.broadcast_flow(self.connections, "flows/update", f)
 
         response = yield ws_client.read_message()
         response = json.loads(response)

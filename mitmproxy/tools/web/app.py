@@ -12,13 +12,16 @@ import secrets
 import sys
 from collections.abc import Callable
 from collections.abc import Sequence
+from collections.abc import Set
 from io import BytesIO
 from typing import Any
 from typing import Awaitable
-from typing import ClassVar
 from typing import Concatenate
 from typing import Literal
 from typing import Optional
+from typing import Protocol
+from typing import Self
+from typing import TypeVar
 
 import tornado.escape
 import tornado.web
@@ -373,9 +376,17 @@ class FilterHelp(RequestHandler):
         self.write(dict(commands=flowfilter.help))
 
 
+_CT = TypeVar("_CT")
+
+
+class AppWithConnections(Protocol[_CT]):
+    master: mitmproxy.tools.web.master.WebMaster
+    connections: set[_CT]
+
+
 class WebSocketEventBroadcaster(tornado.websocket.WebSocketHandler, AuthRequestHandler):
     # raise an error if inherited class doesn't specify its own instance.
-    connections: ClassVar[set[WebSocketEventBroadcaster]]
+    application: AppWithConnections[Self]  # type: ignore[assignment]
 
     _send_queue: asyncio.Queue[bytes]
     _send_task: asyncio.Task[None]
@@ -386,7 +397,7 @@ class WebSocketEventBroadcaster(tornado.websocket.WebSocketHandler, AuthRequestH
         return None
 
     def open(self, *args, **kwargs):
-        self.connections.add(self)
+        self.application.connections.add(self)  # type: ignore[arg-type]
         self._send_queue = asyncio.Queue()
         # Python 3.13+: use _send_queue.shutdown() and we can use keep_ref=True here.
         self._send_task = asyncio_utils.create_task(
@@ -396,13 +407,13 @@ class WebSocketEventBroadcaster(tornado.websocket.WebSocketHandler, AuthRequestH
         )
 
     def on_close(self):
-        self.connections.discard(self)
+        self.application.connections.discard(self)  # type: ignore[arg-type]
         self._send_task.cancel()
 
     @classmethod
-    def broadcast(cls, **kwargs):
+    def broadcast(cls, connections: Set[Self], **kwargs):
         message = cls._json_dumps(kwargs)
-        for conn in cls.connections:
+        for conn in connections:
             conn.send(message)
 
     def send(self, message: bytes):
@@ -422,16 +433,13 @@ class WebSocketEventBroadcaster(tornado.websocket.WebSocketHandler, AuthRequestH
 
 
 class ClientConnection(WebSocketEventBroadcaster):
-    connections: ClassVar[set[ClientConnection]] = set()  # type: ignore
-    application: Application
-
     def __init__(self, application: Application, request, **kwargs):
         super().__init__(application, request, **kwargs)
         self.filters: dict[str, flowfilter.TFilter] = {}  # filters per connection
 
     @classmethod
-    def broadcast_flow_reset(cls) -> None:
-        for conn in cls.connections:
+    def broadcast_flow_reset(cls, connections: Set[Self]) -> None:
+        for conn in connections:
             conn.send(cls._json_dumps({"type": "flows/reset"}))
             for name, expr in conn.filters.copy().items():
                 conn.update_filter(name, expr.pattern)
@@ -439,11 +447,12 @@ class ClientConnection(WebSocketEventBroadcaster):
     @classmethod
     def broadcast_flow(
         cls,
+        connections: Set[Self],
         type: Literal["flows/add", "flows/update"],
         f: mitmproxy.flow.Flow,
     ) -> None:
         flow_json = flow_to_json(f)
-        for conn in cls.connections:
+        for conn in connections:
             conn._broadcast_flow(type, f, flow_json)
 
     def _broadcast_flow(
@@ -916,11 +925,13 @@ handlers = [
 
 class Application(tornado.web.Application):
     master: mitmproxy.tools.web.master.WebMaster
+    connections: set[ClientConnection]
 
     def __init__(
         self, master: mitmproxy.tools.web.master.WebMaster, debug: bool
     ) -> None:
         self.master = master
+        self.connections = set()
         auth_addon: WebAuth = master.addons.get("webauth")
         super().__init__(
             handlers=handlers,  # type: ignore  # https://github.com/tornadoweb/tornado/pull/3455
